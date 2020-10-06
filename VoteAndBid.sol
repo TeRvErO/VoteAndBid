@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.7.0;
 
-// Owned.sol
 contract Owned {
 
     address public owner;
@@ -49,11 +48,7 @@ contract Owned {
 
 }
 
-
-/**
- * The Bet contract does this and that...
- */
-contract Bet is Owned {
+contract VoteAndBid is Owned {
     // Signboard of debates
     string public signboard;
 
@@ -93,6 +88,23 @@ contract Bet is Owned {
     uint endTimeProclamation;
     uint endTimeFinal;
 
+    // ethSavedOpinion[0] is amount of bidded eth of persons that bidded for 0 candidate
+    // and then proclaimed him as winner
+    uint[2] public ethSavedOpinion;
+    // ethChangedOpinion[0] is amount of bidded eth of persons that bidded for 0 candidate
+    // and then proclaimed 1 candidate as winner
+    uint[2] public ethChangedOpinion;
+    // ethLazyOpinion[0] is amount of bidded eth of persons that bidded for 0 candidate
+    // and then nobody proclaimed
+    uint[2] public ethLazyOpinion;
+    uint public winner;
+
+    uint public sharePerHonestWinners;
+    uint public sharePerLazyWinners;
+    uint public ethForHonestLosers;
+    uint public ethForHonestWinners;
+    uint public ethForLazyWinners;
+
     modifier atStage(Stages _stage) {
         require(
             stage == _stage,
@@ -113,14 +125,6 @@ contract Bet is Owned {
         );
         madedWithdraws[msg.sender] = StatusWithdraw.DidWithdraw;
         _;
-    }
-
-    // This modifier goes to the next stage
-    // after the function is done.
-    modifier transitionNext()
-    {
-        _;
-        nextStage();
     }
 
     modifier goodCandidate(uint candidate) {
@@ -162,14 +166,12 @@ contract Bet is Owned {
         stage = Stages.AcceptingBids;
     }
     
-    
     constructor() {}
 
     receive () external payable {}
 
     fallback () external {}
 
-    // Order of the modifiers matters here!
     function makeBid(uint candidate)
         public
         payable
@@ -204,32 +206,6 @@ contract Bet is Owned {
         proclaims[msg.sender] = winner;
         addressMadeProclaim.push(msg.sender);
     }
-
-    // a_0 = ethForCand0Win0;
-    // b_0 = ethForCand0Win1;
-    // a_1 = ethForCand1Win1;
-    // b_1 = ethForCand1Win0;
-    // c_0 = ethForCand0Lazy = totalContributions[0] - a_0 - b_0;
-    // c_1 = ethForCand1Lazy = totalContributions[1] - a_1 - b_1;
-    // totalContributionFor0 = a_0 + b_0 + c_0;
-    // totalContributionFor1 = a_1 + b_1 + c_1;
-
-    // ethSavedOpinion[0] is bidded eth of persons that bidded for 0 candidate
-    // and then proclaimed him as winner
-    uint[2] public ethSavedOpinion;
-    // ethChangedOpinion[0] is bidded eth of persons that bidded for 0 candidate
-    // and then proclaimed 1 candidate as winner
-    uint[2] public ethChangedOpinion;
-    // ethLazyOpinion[0] is bidded eth of persons that bidded for 0 candidate
-    // and then nobody proclaimed
-    uint[2] public ethLazyOpinion;
-    uint public winner;
-
-    uint public sharePerHonestWinners;
-    uint public sharePerLazyWinners;
-    uint public ethForHonestLosers;
-    uint public ethForHonestWinners;
-    uint public ethForLazyWinners;
 
     /// This function calculate a winner after proclaiming phase
     /// It's some kind of metric in the space of bids and responses
@@ -315,6 +291,7 @@ contract Bet is Owned {
         msg.sender.transfer(amount / 2);
     }
 
+    /// Owner can take eth after 7 days of final completion voting
     function WithdrawForgotten()
         public
         startedVote
