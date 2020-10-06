@@ -49,6 +49,7 @@ contract Owned {
 
 }
 
+
 /**
  * The Bet contract does this and that...
  */
@@ -56,16 +57,12 @@ contract Bet is Owned {
     // Signboard of debates
     string public signboard;
 
-    mapping(address => mapping(uint[2] => uint)) bids;
-    mapping(address => StatusProclaim) madedProclaims;
-    mapping(address => uint) proclaims;
-    mapping(address => StatusWithdraw) madedWithdraws;
-    address[] addressMadeProclaim;
-    uint[2] totalContributions;
-
     enum Stages {
+        Initial,
         AcceptingBids,
         RevealWinner,
+        CalculateWinner,
+        Withdrawals,
         Finished
     }
 
@@ -79,17 +76,33 @@ contract Bet is Owned {
         DidWithdraw
     }
 
-    // This is the current stage.
-    Stages public stage = Stages.AcceptingBids;
+    mapping(address => uint) public bidsForCand0;
+    mapping(address => uint) public bidsForCand1;
+    mapping(address => StatusProclaim) public madedProclaims;
+    mapping(address => uint) public proclaims;
+    mapping(address => StatusWithdraw) public madedWithdraws;
+    address[] public addressMadeProclaim;
+    uint[2] public totalContributions;
 
-    uint public creationTime = block.timestamp;
+    Stages public stage = Stages.Initial;
+
+    //uint public creationTime = block.timestamp;
     string[2] public candidates;
+
+    uint endTimeBid;
+    uint endTimeProclamation;
+    uint endTimeFinal;
 
     modifier atStage(Stages _stage) {
         require(
             stage == _stage,
             "Function cannot be called at this time."
         );
+        _;
+    }
+
+    modifier startedVote() {
+        require (stage != Stages.Initial, "Vote didn't started yet");
         _;
     }
 
@@ -102,10 +115,6 @@ contract Bet is Owned {
         _;
     }
 
-    function nextStage() internal {
-        stage = Stages(uint(stage) + 1);
-    }
-
     // This modifier goes to the next stage
     // after the function is done.
     modifier transitionNext()
@@ -114,24 +123,17 @@ contract Bet is Owned {
         nextStage();
     }
 
-    // Perform timed transitions. Be sure to mention
-    // this modifier first, otherwise the guards
-    // will not take the new stage into account.
-    modifier timedTransitions() {
-        if (stage == Stages.AcceptingBlindedBids &&
-                    block.timestamp >= creationTime + 10 days)
-            nextStage();
-        if (stage == Stages.RevealBids &&
-                block.timestamp >= creationTime + 12 days)
-            nextStage();
-        // The other stages transition by transaction
+    modifier goodCandidate(uint candidate) {
+        require (candidate == 0 || candidate == 1, "Wrong index number of candidate");
         _;
     }
 
+    function nextStage() internal {
+        stage = Stages(uint(stage) + 1);
+    }
 
-    modifier goodCandidate(candidate) {
-        require (candidate == 0 || candidate == 1);
-        _;
+    function append(string memory a, string memory b) public pure returns (string memory s){
+        s = string(abi.encodePacked(a, b));
     }
 
     /// This function creates new signboard for participants
@@ -141,19 +143,27 @@ contract Bet is Owned {
     /// @dev After creation signboard we start new votes, so need to start stage
     function createDebate (
         string memory cand1,
-        string memory cand2
-        )
-    public onlyOwner {
-        signboard = cand1 + " vs " + cand2;
-        candidates.push(cand1);
-        candidates.push(cand2);
+        string memory cand2,
+        uint _durationTimeBids,
+        uint _durationTimeProclamation
+    )
+        public
+        onlyOwner
+    {
+        uint startTimeBid;
+        signboard = append(cand1, append(string(" vs "), cand2));
+        candidates[0] = cand1;
+        candidates[1] = cand2;
+        stage = Stages.AcceptingBids;
+        startTimeBid = block.timestamp;
+        endTimeBid = startTimeBid + _durationTimeBids;
+        endTimeProclamation = endTimeBid + _durationTimeProclamation;
+        endTimeFinal = endTimeProclamation + 1 days;
         stage = Stages.AcceptingBids;
     }
     
     
-    constructor() public {
-
-    }
+    constructor() {}
 
     receive () external payable {}
 
@@ -163,22 +173,33 @@ contract Bet is Owned {
     function makeBid(uint candidate)
         public
         payable
-        timedTransitions
+        startedVote
         atStage(Stages.AcceptingBids)
         goodCandidate(candidate)
     {
+        require(stage == Stages.AcceptingBids && block.timestamp <= endTimeBid, "Ended bid phase");
         // Need to prevent a lot of meaningless txs
-        require (msg.value >= 1 ether);
-        bids[msg.sender][candidate] += msg.value;
+        //require (msg.value >= 1 ether);
+        if (candidate == 0)
+            bidsForCand0[msg.sender] += msg.value;
+        else
+            bidsForCand1[msg.sender] += msg.value;
         totalContributions[candidate] += msg.value;
     }
     
     function proclaimWinner(uint winner)
         public
-        timedTransitions
-        atStage(Stages.RevealWinner)
+        startedVote
         goodCandidate(winner)
+        onlyAfter(endTimeBid)
     {
+        if (stage == Stages.AcceptingBids && block.timestamp <= endTimeProclamation)
+            stage = Stages.RevealWinner;
+        require(
+            stage == Stages.RevealWinner && block.timestamp <= endTimeProclamation,
+            "Ended proclamation phase"
+        );
+        require(madedProclaims[msg.sender] == StatusProclaim.NoProclaim, "You have already proclaimed a winner");
         madedProclaims[msg.sender] = StatusProclaim.DidProclaim;
         proclaims[msg.sender] = winner;
         addressMadeProclaim.push(msg.sender);
@@ -195,33 +216,47 @@ contract Bet is Owned {
 
     // ethSavedOpinion[0] is bidded eth of persons that bidded for 0 candidate
     // and then proclaimed him as winner
-    uint[2] ethSavedOpinion;
+    uint[2] public ethSavedOpinion;
     // ethChangedOpinion[0] is bidded eth of persons that bidded for 0 candidate
     // and then proclaimed 1 candidate as winner
-    uint[2] ethChangedOpinion;
+    uint[2] public ethChangedOpinion;
     // ethLazyOpinion[0] is bidded eth of persons that bidded for 0 candidate
     // and then nobody proclaimed
-    uint[2] ethLazyOpinion;
+    uint[2] public ethLazyOpinion;
     uint public winner;
+
+    uint public sharePerHonestWinners;
+    uint public sharePerLazyWinners;
+    uint public ethForHonestLosers;
+    uint public ethForHonestWinners;
+    uint public ethForLazyWinners;
 
     /// This function calculate a winner after proclaiming phase
     /// It's some kind of metric in the space of bids and responses
     /// We have also to add to winners  bids of dishonest users who lied about winner
-    function calculateWinner() public {
+    function calculateWinner()
+        public
+        startedVote
+        onlyAfter(endTimeProclamation)
+        onlyBefore(endTimeFinal)
+    {
+        if (stage == Stages.RevealWinner)
+            stage = Stages.CalculateWinner;
+        require(stage == Stages.CalculateWinner, "Has already calculate winner");
         for (uint i = 0; i < addressMadeProclaim.length; i++) {
             // Made a bid for candidate 0 and proclaimed him
-            if (bids[addressMadeProclaim[i]][0] > 0 && proclaims[addressMadeProclaim[i]] == 0)
-                ethSavedOpinion[0] += bids[addressMadeProclaim[i]][1];
+            if (bidsForCand0[addressMadeProclaim[i]] > 0 && proclaims[addressMadeProclaim[i]] == 0)
+                ethSavedOpinion[0] += bidsForCand0[addressMadeProclaim[i]];
             // Made a bid for candidate 0 and proclaimed candidate 1 as winner
-            else if (bids[addressMadeProclaim[i]][0] > 0 && proclaims[addressMadeProclaim[i]] == 0)
-                ethChangedOpinion[0] += bids[addressMadeProclaim[i]][1];
-            // Another 'if' clause because ome can bid for both candidates simultaneously
+            else if (bidsForCand0[addressMadeProclaim[i]] > 0 && proclaims[addressMadeProclaim[i]] == 1)
+                ethChangedOpinion[0] += bidsForCand0[addressMadeProclaim[i]];
+            // Another 'if' clause because one can bid for both candidates simultaneously
             // Made a bid for candidate 1 and proclaimed him
-            if (bids[addressMadeProclaim[i]][1] > 0 && proclaims[addressMadeProclaim[i]] == 1)
-                ethSavedOpinion[1] += bids[addressMadeProclaim[i]][1];
+            if (bidsForCand1[addressMadeProclaim[i]] > 0 && proclaims[addressMadeProclaim[i]] == 1)
+                ethSavedOpinion[1] += bidsForCand1[addressMadeProclaim[i]];
             // Made a bid for candidate 1 and proclaimed candidate 0 as winner
-            else if (bids[addressMadeProclaim[i]][1] > 0 && proclaims[addressMadeProclaim[i]] == 0)
-                ethChangedOpinion[1] += bids[addressMadeProclaim[i]][1];
+            else if (bidsForCand1[addressMadeProclaim[i]] > 0 && proclaims[addressMadeProclaim[i]] == 0)
+                ethChangedOpinion[1] += bidsForCand1[addressMadeProclaim[i]];
         }
         ethLazyOpinion[0] = totalContributions[0] - ethSavedOpinion[0] - ethChangedOpinion[0];
         ethLazyOpinion[1] = totalContributions[1] - ethSavedOpinion[1] - ethChangedOpinion[1];
@@ -235,25 +270,29 @@ contract Bet is Owned {
         // - that bidded for nonwinner but then admit a winner
         ethForHonestWinners = ethSavedOpinion[1 - winner] + ethChangedOpinion[winner] + ethForHonestLosers;
         ethForLazyWinners = ethLazyOpinion[1 - winner];
-        sharePerHonestWinners = ethForHonestWinners / ethSavedOpinion[winner];
-        sharePerLazyWinners = ethForLazyWinners / ethLazyOpinion[winner];
+        sharePerHonestWinners = (ethSavedOpinion[winner] != 0) ? ethForHonestWinners / ethSavedOpinion[winner] : 0;
+        sharePerLazyWinners = (ethLazyOpinion[winner] != 0) ? ethForLazyWinners / ethLazyOpinion[winner] : 0;
+        stage = Stages.Withdrawals;
     }
     
     /// Only honest bidders and lazy winners that bidded for winner can 
     /// take their prize
     function withdrawWin()
         public
-        atStage(Stages.Finished)
+        startedVote
+        atStage(Stages.Withdrawals)
         notWithdrawn
     {
-        require(bids[msg.sender][winner] > 0, "You didn't do a bid for winner");
+        uint amount;
+        amount = (winner == 0) ? bidsForCand0[msg.sender] : bidsForCand1[msg.sender];
+        require(amount > 0, "You didn't do a bid for winner");
         // made a payment for lazy winner
         if (madedProclaims[msg.sender] == StatusProclaim.NoProclaim) {
-            msg.sender.transfer(bids[msg.sender][winner] * sharePerLazyWinners);
+            msg.sender.transfer(amount * sharePerLazyWinners);
         } else {
             require(proclaims[msg.sender] == winner, "You lied about winner");
             // made a payment for honest winner
-            msg.sender.transfer(bids[msg.sender][winner] * sharePerHonestWinners);
+            msg.sender.transfer(amount * sharePerHonestWinners);
         }
     }
 
@@ -261,16 +300,28 @@ contract Bet is Owned {
     /// proclaimed right winner can return half of bid
     function withdrawLose()
         public
-        atStage(Stages.Finished)
+        startedVote
+        atStage(Stages.Withdrawals)
         notWithdrawn
     {
-        require(bids[msg.sender][1 - winner] > 0, "You didn't do a bid for loser");
+        uint amount;
+        amount = (winner == 0) ? bidsForCand1[msg.sender] : bidsForCand0[msg.sender];
+        require(amount > 0, "You didn't do a bid for loser");
         require(
             madedProclaims[msg.sender] == StatusProclaim.DidProclaim,
             "You didn't proclaim any winner"
         );
-        require(madedProclaims[msg.sender] == winner, "You lied about winner");
-        msg.sender.transfer(bids[msg.sender][1 - winner] / 2);
+        require(proclaims[msg.sender] == winner, "You lied about winner");
+        msg.sender.transfer(amount / 2);
     }
 
+    function WithdrawForgotten()
+        public
+        startedVote
+        onlyOwner
+        onlyAfter(endTimeFinal + 7 days)
+    {
+        stage = Stages.Finished;
+        msg.sender.transfer(address(this).balance);
+    }   
 }
