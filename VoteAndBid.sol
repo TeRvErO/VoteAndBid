@@ -52,11 +52,15 @@ contract VoteAndBid is Owned {
     // Signboard of debates
     string public signboard;
 
+    event Bid(address bidder, uint candidate);
+    event Proclamation(address bidder, uint winner);
+    event CalculatedWinner(uint winner);
+    
     enum Stages {
         Initial,
         AcceptingBids,
         RevealWinner,
-        CalculaiteWnner,
+        CalculateWinner,
         Withdrawals,
         Finished
     }
@@ -83,30 +87,31 @@ contract VoteAndBid is Owned {
     }
 
     struct Rewards {
-        // this is reward pool for honest losers who proclaimed right winner. 
-        // It's returns half of their initial bids:
+        // Reward pool for honest losers who proclaimed right winner. 
+        // It's returns half of their initial bids
         uint ethForHonestLosers;
-        // this is reward pool for honest winners. It's consist of bids of persons:
+        // Reward pool for honest winners. It's consist of bids of persons:
         // - that bidded for nonwinner and after didn't change their opinion
         // - that bidded for winner but then lied about real winner
-        // - that bidded for nonwinner but then admit a winner
+        // - the half of bid of users who vote for nonwinner but then proclaimed right winner
         uint ethForHonestWinners;
-        // this is reward pool for lazy winers. It's consist of bids of lazy losers
+        // Reward pool for lazy winers. It's consist of bids of lazy losers
         uint ethForLazyWinners;
     }
 
     mapping(address => UserInfo) public users;
+    // info about bids and its transhes for each candidate
     TranchesEthOfUsers[2] public bids;
     Rewards public rewards;
-    address[] public addressMadeProclaim;
-
-    Stages public stage = Stages.Initial;
-
+    
+    Stages public stage;
+    // candidates for voting as strings
     string[2] public candidates;
     uint endTimeBid;
     uint endTimeProclamation;
     uint endTimeFinal;
 
+    address[] public addressMadeProclaim;
     uint public winner;
 
     uint public sharePerHonestWinners;
@@ -131,7 +136,7 @@ contract VoteAndBid is Owned {
         _;
     }
 
-    modifier goodCandidate(uint candidate) {
+    modifier isGoodCandidate(uint candidate) {
         require (candidate == 0 || candidate == 1, "Wrong index number of candidate");
         _;
     }
@@ -162,7 +167,6 @@ contract VoteAndBid is Owned {
         signboard = append(cand1, append(string(" vs "), cand2));
         candidates[0] = cand1;
         candidates[1] = cand2;
-        stage = Stages.AcceptingBids;
         startTimeBid = block.timestamp;
         endTimeBid = startTimeBid + _durationTimeBids;
         endTimeProclamation = endTimeBid + _durationTimeProclamation;
@@ -176,75 +180,80 @@ contract VoteAndBid is Owned {
 
     fallback () external {}
 
+    // Function to make a bid for candidate in current voting
     function makeBid(uint candidate)
         public
         payable
-        startedVote
-        atStage(Stages.AcceptingBids)
-        goodCandidate(candidate)
+        isGoodCandidate(candidate)
     {
         require(stage == Stages.AcceptingBids && block.timestamp <= endTimeBid, "Ended bid phase");
         // Need to prevent a lot of meaningless txs
-        //require (msg.value >= 1 ether);
+        require(msg.value > 0 ether, "Bid must be higher");
+
+        if (users[msg.sender].amountBid != 0)
+            require(candidate == users[msg.sender].candidate, "You have already made a bid for another candidate");
         users[msg.sender].candidate = candidate;
         users[msg.sender].amountBid += msg.value;
         bids[candidate].totalContributions += msg.value;
+
+        emit Bid(msg.sender, candidate);
     }
     
-    function proclaimWinner(uint proclaimWinner)
+    // Function to proclaim winner after bidding phase
+    function proclaimWinner(uint proclaimedWinner)
         public
-        startedVote
-        goodCandidate(winner)
+        isGoodCandidate(winner)
         onlyAfter(endTimeBid)
+        onlyBefore(endTimeProclamation)
     {
-        if (stage == Stages.AcceptingBids && block.timestamp <= endTimeProclamation)
+        if (stage == Stages.AcceptingBids)
             stage = Stages.RevealWinner;
-        require(
-            stage == Stages.RevealWinner && block.timestamp <= endTimeProclamation,
-            "Ended proclamation phase"
-        );
+
+        require(stage == Stages.RevealWinner, "Ended proclamation phase");
+        require(users[msg.sender].amountBid > 0, "Only users who made a bid can proclaim a winner");
         require(!users[msg.sender].statusProclaim, "You have already proclaimed a winner");
+
         users[msg.sender].statusProclaim = true;
-        users[msg.sender].winner = proclaimWinner;
+        users[msg.sender].winner = proclaimedWinner;
         addressMadeProclaim.push(msg.sender);
+
+        emit Proclamation(msg.sender, proclaimedWinner);
     }
 
     /// This function calculate a winner after proclaiming phase
     /// It's some kind of metric in the space of bids and responses
-    /// We have also to add to winners  bids of dishonest users who lied about winner
+    /// We have to also add to winners bids of dishonest users who lied about winner
     function calculateWinner()
         public
-        startedVote
+        atStage(Stages.RevealWinner)
         onlyAfter(endTimeProclamation)
         onlyBefore(endTimeFinal)
     {
-        if (stage == Stages.RevealWinner)
-            stage = Stages.CalculateWinner;
+        stage = Stages.CalculateWinner;
         require(stage == Stages.CalculateWinner, "Has already calculate winner");
         for (uint i = 0; i < addressMadeProclaim.length; i++) {
             // Made a bid for candidate 0 and proclaimed him
             address addr = addressMadeProclaim[i];
-            if (users[addr].amountBid > 0 && users[addr].candidate == 0 && users[addr].winner == 0)
+            if (users[addr].candidate == 0 && users[addr].winner == 0)
                 bids[0].ethSavedOpinion += users[addr].amountBid;
             // Made a bid for candidate 0 and proclaimed candidate 1 as winner
-            else if (users[addr].amountBid > 0 && users[addr].candidate == 0 && users[addr].winner == 1)
+            else if (users[addr].candidate == 0 && users[addr].winner == 1)
                 bids[0].ethChangedOpinion += users[addr].amountBid;
-            // Another 'if' clause because one can bid for both candidates simultaneously
             // Made a bid for candidate 1 and proclaimed him
-            if (users[addr].amountBid > 0 && users[addr].candidate == 1 && users[addr].winner == 1)
+            else if (users[addr].candidate == 1 && users[addr].winner == 1)
                 bids[1].ethSavedOpinion += users[addr].amountBid;
             // Made a bid for candidate 1 and proclaimed candidate 0 as winner
-            else if (users[addr].amountBid > 0 && users[addr].candidate == 1 && users[addr].winner == 0)
+            else if (users[addr].candidate == 1 && users[addr].winner == 0)
                 bids[1].ethChangedOpinion += users[addr].amountBid;
         }
-        bids[0].ethLazyOpinion = bids[0].totalContributions -
-            bids[0].ethSavedOpinion - bids[0].ethChangedOpinion;
-        bids[1].ethLazyOpinion = bids[1].totalContributions -
-            bids[1].ethSavedOpinion - bids[1].ethChangedOpinion;
+        for (uint i; i < candidates.length; i++)
+            bids[i].ethLazyOpinion = bids[i].totalContributions -
+                bids[i].ethSavedOpinion - bids[i].ethChangedOpinion;
+
         winner = (bids[0].ethSavedOpinion + bids[1].ethChangedOpinion > bids[1].ethSavedOpinion + bids[0].ethChangedOpinion) ? 0 : 1;
         //q = totalContributions[0] / totalContributions[1];
         // winner = (a_0 / q + b_1 * q > a_1 * q + b_0 / q) ? 0 : 1;
-        rewards.ethForHonestLosers = rewards.ethChangedOpinion / 2;
+        rewards.ethForHonestLosers = bids[1 - winner].ethChangedOpinion / 2;
         rewards.ethForHonestWinners = bids[1 - winner].ethSavedOpinion +
             bids[winner].ethChangedOpinion + rewards.ethForHonestLosers;
         rewards.ethForLazyWinners = bids[1 - winner].ethLazyOpinion;
@@ -254,10 +263,12 @@ contract VoteAndBid is Owned {
         sharePerLazyWinners = (bids[winner].ethLazyOpinion != 0) ?
             rewards.ethForLazyWinners / bids[winner].ethLazyOpinion : 0;
         stage = Stages.Withdrawals;
+
+        emit CalculatedWinner(winner);
     }
     
-    /// Only honest bidders and lazy winners that bidded for winner can 
-    /// take their prize
+    /// Only honest active (who proclaimed winner) bidders and lazy users 
+    /// that bidded for winner can take their prize
     function withdrawWin()
         public
         startedVote
@@ -265,7 +276,7 @@ contract VoteAndBid is Owned {
         notWithdrawn
     {
         require(
-            users[msg.sender].candidate == winner && users[msg.sender].amountBid > 0, 
+            users[msg.sender].amountBid > 0 && users[msg.sender].candidate == winner, 
             "You didn't do a bid for winner"
         );
         // made a payment for lazy winner
@@ -274,7 +285,7 @@ contract VoteAndBid is Owned {
         } else {
             require(users[msg.sender].winner == winner, "You lied about winner");
             // made a payment for honest winner
-            msg.sender.transfer(users[msg.sender].amountBid  * sharePerHonestWinners);
+            msg.sender.transfer(users[msg.sender].amountBid * sharePerHonestWinners);
         }
     }
 
@@ -287,7 +298,7 @@ contract VoteAndBid is Owned {
         notWithdrawn
     {
         require(
-            users[msg.sender].candidate != winner && users[msg.sender].amountBid > 0,
+            users[msg.sender].amountBid > 0 && users[msg.sender].candidate != winner,
             "You didn't do a bid for loser"
         );
         require(users[msg.sender].statusProclaim, "You didn't proclaim any winner");
@@ -295,7 +306,7 @@ contract VoteAndBid is Owned {
         msg.sender.transfer(users[msg.sender].amountBid / 2);
     }
 
-    /// Owner can take eth after 7 days of final completion voting
+    /// Owner can take eth after 7 days of final completion of voting
     function WithdrawForgotten()
         public
         startedVote
