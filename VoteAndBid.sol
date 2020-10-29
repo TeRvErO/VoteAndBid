@@ -229,6 +229,7 @@ contract VoteAndBid is Owned {
         onlyAfter(endTimeProclamation)
         onlyBefore(endTimeFinal)
     {
+
         stage = Stages.CalculateWinner;
         require(stage == Stages.CalculateWinner, "Has already calculate winner");
         for (uint i = 0; i < addressMadeProclaim.length; i++) {
@@ -307,7 +308,7 @@ contract VoteAndBid is Owned {
     }
 
     /// Owner can take eth after 7 days of final completion of voting
-    function WithdrawForgotten()
+    function withdrawForgotten()
         public
         startedVote
         onlyOwner
@@ -315,5 +316,171 @@ contract VoteAndBid is Owned {
     {
         stage = Stages.Finished;
         msg.sender.transfer(address(this).balance);
-    }   
+    }
+
+    // Function to proclaim winner after bidding phase
+    function proclaimWinner(uint vote, uint winner)
+        public
+        isGoodCandidate(winner)
+        onlyAfter(endTimeBid)
+        onlyBefore(endTimeProclamation)
+    {
+        if (stage == Stages.AcceptingBids)
+            stage = Stages.RevealWinner;
+
+        require(stage == Stages.RevealWinner, "Ended proclamation phase");
+        judges.setWinnerByDelegate(vote, winner);
+
+        emit Proclamation(msg.sender, proclaimedWinner);
+    }
+
+    function calculateWinner(uint vote)
+        public
+        atStage(Stages.RevealWinner)
+        onlyAfter(endTimeProclamation)
+        onlyBefore(endTimeFinal)
+    {
+        stage = Stages.CalculateWinner;
+        require(stage == Stages.CalculateWinner, "Has already calculate winner");
+
+        winner = judges.calculateWinner(vote);
+        uint totalContributions = bids[0].totalContributions + bids[1].totalContributions;
+        rewards[vote].ethForDelegators = totalContributions.div(100);
+        rewards[vote].ethForOwner = totalContributions.div(100);
+        rewards[vote].ethForWinningVotes = totalContributions.mul(98).div(100);
+
+        sharePerDelegator = rewards[vote].ethForDelegators.div(judges.countHonestDelegators(vote, winner));
+
+        stage = Stages.Withdrawals;
+
+        emit CalculatedWinner(winner);
+    }
+
+    /// Only honest active (who proclaimed winner) bidders and lazy users 
+    /// that bidded for winner can take their prize
+    function withdrawWin(uint vote)
+        public
+        startedVote
+        atStage(Stages.Withdrawals)
+        notWithdrawn
+    {
+        require(
+            users[msg.sender].amountBid > 0 && users[msg.sender].candidate == winner, 
+            "You didn't do a bid for winner"
+        );
+        msg.sender.transfer(users[msg.sender].amountBid.mul(rewards[vote].ethForWinningVotes).div(bids[winner].totalContributions));
+    }
+
+    /// Only honest active (who proclaimed winner) bidders and lazy users 
+    /// that bidded for winner can take their prize
+    function withdrawDelegatorFee(uint vote)
+        public
+        startedVote
+        atStage(Stages.Withdrawals)
+        notWithdrawn
+    {
+        require(judges.isDelegator(), "You are not a judge");
+        require(judges.getWinner(vote) == winner, "You lied about winner");
+        msg.sender.transfer(rewards[vote].ethForDelegators.div(countHonestDelegators(vote, winner)));
+    }
+}
+
+contract Judges is Owned {
+
+    event CalculatedWinner(uint vote, address delegator, uint winner);
+
+    uint[] public winners;
+
+    mapping (uint => uint) winners;
+    mapping (uint => uint) sumWinnerForVote;
+    mapping (address => bool) statusDelegate;
+    mapping (uint => mapping(uint => uint)) countSetsDelegators;
+
+    struct DelegateVote {
+        bool announcedWinner;
+        uint winner;
+    }
+
+    struct Winner {
+        bool calculated;
+        uint winner;
+    }
+
+    mapping (uint => mapping(address => DelegateVote)) infoDelegates;
+    mapping (uint => Winner) infoWinners;
+
+    constructor() {
+        statusDelegate[msg.sender] = true;
+    }
+
+    receive () external payable {}
+
+    fallback () external {}
+
+    function setVote(uint _vote) onlyOwner {
+        currentVote = _vote;
+    }
+
+    function addDelegate(address _delegate) onlyOwner {
+        statusDelegate[_delegate] = true;
+    }
+
+    function removeDelegate(address _delegate) onlyOwner {
+        statusDelegate[_delegate] = false;
+    }
+
+    function isDelegator() public {
+        return statusDelegate[msg.sender];
+    }
+
+    function getWinner(uint vote) onlyDelegators {
+        require(infoDelegates[vote][msg.sender].announcedWinner, "You didn't set a winner in this vote");
+        return infoDelegates[vote][msg.sender].winner;
+    }
+
+    function getReward (uint vote) onlyDelegators {
+        require (infoWinners[vote].calculated, "Didn't calculated winner for this vote");
+        return (getWinner(vote) == infoWinners[vote].winner);
+    }
+    
+    function countHonestDelegators (uint vote, uint winner) external {
+        return countSetsDelegators[vote][winner];
+    }
+
+    modifier onlyDelegators {
+        require (isDelegator(), "Only for delegators");
+        _;
+    }  
+
+    /// This function calculate a winner after proclaiming phase
+    /// It's some kind of metric in the space of bids and responses
+    /// We have to also add to winners bids of dishonest users who lied about winner
+    function setWinnerByDelegate(uint vote, uint _winner)
+        public
+        payable
+        onlyDelegators
+    {
+        require (vote == currentVote, "Current vote is not vote in parameter");
+        require(stage == Stages.CalculateWinner, "Has already calculate winner");
+        infoDelegates[vote][msg.sender].announcedWinner = true;
+        infoDelegates[vote][msg.sender].winner = _winner;
+        sumWinnerForVote[vote] += _winner;
+        countSetsDelegators[vote][_winner] += 1;
+
+        emit CalculatedWinner(vote, msg.sender, winner);
+    }
+
+    function calculateWinner(uint vote)
+        public
+        returns (uint winner)
+    {
+        require (vote == currentVote, "Current vote is not vote in parameter");
+        require(!infoWinners[vote].calculated, "Already calculated");
+        infoWinners[vote].calculated = true;
+        if (2 * sumWinnerForVote[vote] > winners.length)
+            winner = 1;
+        else
+            winner = 0;
+        infoWinners[vote].winner = winner;
+    }
 }
